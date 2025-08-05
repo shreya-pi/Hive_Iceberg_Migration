@@ -41,10 +41,10 @@ All `spark-submit` commands require specific packages and configurations for Ice
 ```bash
 spark-submit \
   # --- Required for Iceberg ---
-  --packages org.apache.iceberg:iceberg-spark-runtime-3.3_2.12:1.1.0 \
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.4_2.13-1.7.1 \
   
   # --- Required for Azure Connectivity ---
-  --packages org.apache.hadoop:hadoop-azure:3.3.1,com.azure:azure-storage-blob:12.14.1 \
+  --packages org.apache.hadoop:hadoop-azure:3.3.6,com.azure:azure-storage-blob:8.6.6 \
 
   # --- Required for On-Prem Hive Catalog ---
   --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
@@ -55,7 +55,6 @@ spark-submit \
   # --- Required for Azure Blob Catalog ---
   --conf spark.sql.catalog.azure_blob_catalog=org.apache.iceberg.spark.SparkCatalog \
   --conf spark.sql.catalog.azure_blob_catalog.type=hive \
-  --conf spark.sql.catalog.azure_blob_catalog.uri=thrift://<AZURE-METASTORE-IP>:9083 \
   --conf spark.hadoop.fs.azure.account.key.<your-storage-account>.dfs.core.windows.net=<YOUR-AZURE-STORAGE-KEY> \
   
   <your-script-name.py> [ARGUMENTS]
@@ -81,10 +80,7 @@ Here is a detailed explanation of each file in this toolkit.
 | `create_iceberg_from_hdfs.scala`       | A reference Scala script showing how to create an Iceberg table from files on HDFS (e.g., Parquet).            | Run via `spark-shell` by pasting the code.                                                                                  |
 | `migrate_iceberg_to_Azure.py`          | A reference Python script showing the basic logic for migrating a single, hardcoded Iceberg table.             | Run via `spark-submit`.                                                                                                     |
 | `create_multiple_iceberg_command_line.py` | An older or alternative version of the Hive-to-Iceberg engine script.                                      | Usage is similar to `create_multiple_icerberg_tables_hive.py`. It is recommended to consolidate into one engine.           |
-| **Utilities**                          |                                                                                                              |                                                                                                                             |
-| `structure.txt` / `structure.py`       | Helper files likely used for defining or visualizing the project structure or example commands.                | View `structure.txt` for information. Run `python3 structure.py` if it generates output.                                    |
 
----
 
 ## Detailed Workflow Walkthroughs
 
