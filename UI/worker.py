@@ -5,6 +5,7 @@ import json
 import uuid
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 import os
 
 # --- Configuration (no changes here) ---
@@ -20,15 +21,22 @@ ARCHIVE_DIR.mkdir(exist_ok=True)
 
 AZURE_KEY =os.getenv("AZURE_KEY")
 
-def update_job_status(job_file_path, status):
+def update_job_status(job_file_path, status, start_time=None, end_time=None):
     """Updates the status in the job JSON file."""
     if not job_file_path.exists(): return
     with open(job_file_path, 'r+') as f:
         data = json.load(f)
         data['status'] = status
+        if start_time:
+            data['start_time'] = start_time
+        if end_time:
+            data['end_time'] = end_time
+
         f.seek(0)
         json.dump(data, f, indent=4)
         f.truncate()
+
+
 
 def process_job(job_file_path):
     """Processes a single job file by inspecting its type."""
@@ -40,7 +48,10 @@ def process_job(job_file_path):
     log_file = LOGS_DIR / f"{job_id}.log"
 
     print(f"[{time.ctime()}] Found new job: {job_id} (Type: {job_type}). Processing...")
-    update_job_status(job_file_path, "running")
+    # start_iso = datetime.utcnow().isoformat() + "Z"
+    start_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    update_job_status(job_file_path, "running", start_time=start_iso)
+    # update_job_status(job_file_path, "running")
 
     command = []
     # --- COMMAND ROUTING LOGIC ---
@@ -108,6 +119,17 @@ def process_job(job_file_path):
         ]
         command.extend(job_data["tables"])
 
+    elif job_type == "export_audit_to_snowflake":
+        print(f"[{time.ctime()}] Building command for audit export to Snowflake.")
+        # This job is run with `python3`, not `spark-submit`.
+        command = [
+            "python3",
+            "export_audit_to_snowflake.py",
+            "--csv-path", job_data["csv_path"],
+            "--sf-db", job_data["sf_db"],
+            "--sf-schema", job_data["sf_schema"],
+        ]
+
     else:
         print(f"[{time.ctime()}] ERROR: Unknown job type '{job_type}' for job {job_id}.")
         update_job_status(job_file_path, "failed")
@@ -129,6 +151,15 @@ def process_job(job_file_path):
         print(f"[{time.ctime()}] ERROR: Job {job_id} failed.")
         update_job_status(job_file_path, "failed")
     
+    end_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    if job_succeeded:
+        print(f"[{time.ctime()}] Job {job_id} completed successfully.")
+        update_job_status(job_file_path, "completed", end_time=end_iso)
+    else:
+        print(f"[{time.ctime()}] ERROR: Job {job_id} failed.")
+        update_job_status(job_file_path, "failed", end_time=end_iso)
+
     if job_succeeded and job_type == "migrate_catalogs" and job_data.get("register_on_snowflake", False):
         print(f"[{time.ctime()}] Migration successful. Chaining Snowflake registration job.")
         

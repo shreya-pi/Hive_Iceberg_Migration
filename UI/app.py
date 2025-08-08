@@ -1,11 +1,16 @@
 # app.py
 import streamlit as st
-import subprocess
 import uuid
 import json
+import os
+import io
+import pandas as pd
+from pathlib import Path
+from generate_audit_report import generate_report
 from pathlib import Path
 from pyspark.sql import SparkSession
 from config import SNOWFLAKE_CONFIG  # Ensure this is defined in your config module
+from generate_audit_report import generate_report
 
 # --- Configuration ---
 QUEUE_DIR = Path("queue")
@@ -77,7 +82,7 @@ def get_tables(_spark_session, database, catalog_name=None): # Pass the session 
 st.set_page_config(layout="wide")
 st.title("Iceberg Creation and Migration Tool")
 
-tab1, tab2= st.tabs(["Ingest Hive Table to Iceberg", "Migrate Iceberg to Azure"])
+tab1, tab2, tab3= st.tabs(["Ingest Hive Table to Iceberg", "Migrate Iceberg to Azure", "Generate Audit Report"])
 
 hive_spark = get_hive_session()
 iceberg_spark = get_iceberg_session() # Get the Spark session resource
@@ -165,6 +170,143 @@ with tab2:
             json.dump(job_data, f, indent=4)
             
         st.success(f"Successfully submitted Migration Job! Job ID: {job_id}")
+
+
+with tab3:
+    st.header("Job Audit Reporting")
+    st.markdown("Generate a summary of all completed jobs from the archive. The table below is sortable and searchable.")
+    
+    # Initialize session state if it doesn't exist
+    if 'audit_df' not in st.session_state:
+        st.session_state.audit_df = None
+
+        st.session_state.audit_df, _ = generate_report()
+
+    # Use columns for layout
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("Update Report (Incremental)", type="primary"):
+            with st.spinner("Checking for new jobs and updating report..."):
+                df, message = generate_report(force_full_rescan=False)
+                # Always update the session state with the returned DataFrame
+                st.session_state.audit_df = df
+                st.toast(message)
+                
+    with col2:
+        if st.button("Re-generate Full Report (Full Rescan)"):
+            with st.spinner("Performing full rescan of all archived jobs..."):
+                df, message = generate_report(force_full_rescan=True)
+                # Always update the session state with the returned DataFrame
+                st.session_state.audit_df = df
+                st.success(f"Full rescan complete! {message}")
+
+    st.divider()
+
+    # --- THIS IS THE CORRECTED DISPLAY LOGIC ---
+    # On first load, try to generate the report automatically to show existing data
+
+ # --- Filtering and Display Logic ---
+    if st.session_state.audit_df is not None and not st.session_state.audit_df.empty:
+        # Create a mutable copy of the dataframe for filtering
+        filtered_df = st.session_state.audit_df.copy()
+
+        st.subheader("Filter Report")
+        
+        # --- Create Filter Widgets ---
+        filter_col1, filter_col2 = st.columns(2)
+        
+        with filter_col1:
+            # Get unique values from the dataframe for the filter options
+            job_types = filtered_df['Job Type'].unique()
+            selected_job_types = st.multiselect(
+                "Filter by Job Type",
+                options=job_types,
+                default=job_types # Default to all selected
+            )
+        
+        with filter_col2:
+            statuses = filtered_df['Status'].unique()
+            selected_statuses = st.multiselect(
+                "Filter by Status",
+                options=statuses,
+                default=statuses # Default to all selected
+            )
+            
+        # --- Apply Filters to the DataFrame ---
+        if selected_job_types:
+            filtered_df = filtered_df[filtered_df['Job Type'].isin(selected_job_types)]
+        
+        if selected_statuses:
+            filtered_df = filtered_df[filtered_df['Status'].isin(selected_statuses)]
+            
+        st.subheader("Filtered Report Summary")
+        
+        # Display the FILTERED DataFrame
+        st.dataframe(filtered_df, use_container_width=True)
+        
+        # The download button will download the FILTERED view
+        csv_bytes = filtered_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Filtered Report as CSV",
+            data=csv_bytes,
+            file_name="filtered_job_audit_report.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No audit data to display. Run a job and then click a button above to generate a report.")
+ 
+    st.subheader("Export Report to Snowflake")
+    # Check if there's a report to export
+    if st.session_state.get('audit_df') is not None and not st.session_state.audit_df.empty:
+        with st.form("snowflake_export_form"):
+            st.markdown("This will **create or replace** the `AUDIT_TABLE` in the specified Snowflake schema with the currently displayed (filtered) data.")
+            
+            # sf_col1, sf_col2 = st.columns(2)
+            # with sf_col1:
+            #     sf_db = st.text_input("Snowflake Database", key="export_sf_db")
+            # with sf_col2:
+            #     sf_schema = st.text_input("Snowflake Schema", key="export_sf_schema")
+
+            sf_db = st.text_input("Snowflake Database", value=SNOWFLAKE_CONFIG.get('database', 'default_db'), key="export_sf_db")
+            sf_schema = st.text_input("Snowflake Schema", value=SNOWFLAKE_CONFIG.get('schema', 'public'), key="export_sf_schema")
+            
+            # Form submission button
+            submitted = st.form_submit_button(
+                "Export to Snowflake", 
+                type="primary",
+                disabled=(not sf_db or not sf_schema)
+            )
+
+            if submitted:
+                # 1. Save the currently filtered DataFrame to a temporary CSV
+                temp_csv_path = "temp_audit_export.csv"
+                # filtered_df = st.session_state.audit_df # Assume we are exporting the full view for now
+                
+                # If you want to export the filtered view, you need to apply filters first
+                # (The current code exports the full dataframe held in session state)
+                
+                # filtered_df.to_csv(temp_csv_path, index=False)
+                st.session_state.audit_df.to_csv(temp_csv_path, index=False)
+                
+                # 2. Create and queue the job
+                job_id = str(uuid.uuid4())
+                job_data = {
+                    "job_id": job_id,
+                    "job_type": "export_audit_to_snowflake",
+                    "csv_path": temp_csv_path,
+                    "sf_db": sf_db,
+                    "sf_schema": sf_schema,
+                    "status": "pending"
+                }
+                with open(QUEUE_DIR / f"{job_id}.json", 'w') as f:
+                    json.dump(job_data, f, indent=4)
+                
+                st.success(f"Successfully submitted Audit Export Job! See status below. Job ID: {job_id}")
+    else:
+        st.info("Generate a report first before you can export it.")
+
+
 
 
 # --- Job Status Display (remains at the bottom, outside the tabs) ---
